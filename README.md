@@ -16,11 +16,17 @@ Go 语言 SSTV 编解码与 Wails 跨平台桌面收发工作台。项目包含 
 | Artifact | 内容 |
 | --- | --- |
 | `SATSSTV-Go-windows-amd64` | Windows GUI `.exe` + CLI `.exe` |
-| `SATSSTV-Go-linux-amd64` | Linux GUI + CLI，`.tar.gz` |
+| `SATSSTV-Go-linux-amd64` | Linux GUI + CLI，`.tar.gz`、`.deb`、`.AppImage` |
 | `SATSSTV-Go-macos-arm64` | Apple Silicon `.app` + CLI |
 | `SATSSTV-Go-macos-amd64` | Intel `.app` + CLI |
 
-构建产物只作为 Actions Artifacts 保存，不创建 Git Tag，不发布 GitHub Release。打开仓库的 **Actions → 对应 workflow run → Artifacts** 即可下载。
+普通分支和 PR 构建的产物作为 Actions Artifacts 保存，打开仓库的 **Actions → 对应 workflow run → Artifacts** 即可下载。
+
+### 正式版本发布
+
+在 Actions → CI - Test, Build & Package → Run workflow 中选择 `main` 并填写 `release_version`（例如 `v3.7.0`），或推送 `vMAJOR.MINOR.PATCH` 标签、`release/vMAJOR.MINOR.PATCH` 发布分支。留空则只执行 CI。新 fork 需先在 Actions 页面启用工作流。
+
+全部四个平台测试、构建及打包成功后，发布任务汇总 Windows ZIP、Linux TAR.GZ/DEB/AppImage、macOS ARM64/AMD64 ZIP 与 `SHA256SUMS.txt`，创建对应 Git Tag 和正式 GitHub Release。既有版本不会被覆盖；Linux DEB 使用相同的发布版本号。普通 PR 不执行发布任务。macOS 包未经过 Developer ID 公证，CI 也不替代真实电台互操作测试。
 
 Linux CI 使用 Ubuntu 24.04 x64 和 WebKit2GTK 4.1（`webkit2_41` 构建标签）；macOS 分别生成 Apple Silicon 与 Intel 两种原生架构包。Linux 桌面运行时需要 GTK 3 与 WebKit2GTK 4.1；Windows 桌面使用 WebView2；macOS 使用系统 WebKit。Windows RTS/DTR 串口 PTT 仍仅在 Windows 上可用。
 
