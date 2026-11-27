@@ -5,6 +5,12 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      release_version:
+        description: 'Stable version (vMAJOR.MINOR.PATCH); empty runs CI only'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -14,7 +20,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  prepare:
+    name: Resolve release version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Resolve version
+        id: version
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.release_version }}
+        run: |
+          set -euo pipefail
+          version=""
+          case "$GITHUB_EVENT_NAME:$GITHUB_REF" in
+            push:refs/tags/v*) version="$GITHUB_REF_NAME" ;;
+            push:refs/heads/release/v*) version="${GITHUB_REF_NAME#release/}" ;;
+            workflow_dispatch:refs/heads/main) version="$REQUESTED_VERSION" ;;
+            workflow_dispatch:*)
+              if [[ -n "$REQUESTED_VERSION" ]]; then
+                echo "::error::Manual releases must run from main."
+                exit 1
+              fi
+              ;;
+          esac
+          if [[ -n "$version" && ! "$version" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Stable release version must be vMAJOR.MINOR.PATCH."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
   test-build-package:
+    needs: prepare
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
@@ -201,7 +239,7 @@ jobs:
         if: runner.os == 'Linux'
         env:
           ARTIFACT: ${{ matrix.artifact }}
-          PACKAGE_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+          PACKAGE_VERSION: ${{ needs.prepare.outputs.version }}
         run: bash .github/scripts/package-linux-installers.sh
         shell: bash
 
@@ -225,3 +263,87 @@ jobs:
           path: artifacts/SATSSTV-Go-${{ matrix.artifact }}.*
           if-no-files-found: error
           retention-days: 14
+
+  publish-release:
+    name: Publish stable GitHub Release
+    needs: [prepare, test-build-package]
+    if: ${{ needs.prepare.outputs.version != '' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency:
+      group: satsstv-release-${{ needs.prepare.outputs.version }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Download all platform packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: SATSSTV-Go-*
+          path: release-assets
+          merge-multiple: true
+      - name: Verify packages and calculate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          files=(
+            SATSSTV-Go-windows-amd64.zip
+            SATSSTV-Go-linux-amd64.tar.gz
+            SATSSTV-Go-linux-amd64.deb
+            SATSSTV-Go-linux-amd64.AppImage
+            SATSSTV-Go-macos-arm64.zip
+            SATSSTV-Go-macos-amd64.zip
+          )
+          for file in "${files[@]}"; do
+            test -s "$file"
+          done
+          sha256sum "${files[@]}" > SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
+      - name: Publish release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Release $VERSION already exists; choose a new version."
+            exit 1
+          fi
+          refs="$(git ls-remote origin "refs/tags/$VERSION" "refs/tags/$VERSION^{}")"
+          if [[ -n "$refs" ]]; then
+            tag_sha="$(printf '%s\n' "$refs" | awk '$2 ~ /\^\{\}$/ { print $1 }')"
+            if [[ -z "$tag_sha" ]]; then
+              tag_sha="$(printf '%s\n' "$refs" | awk 'NR == 1 { print $1 }')"
+            fi
+            if [[ "$tag_sha" != "$GITHUB_SHA" ]]; then
+              echo "::error::Existing tag points to a different commit."
+              exit 1
+            fi
+          fi
+          cat > release-notes.md <<'NOTES'
+          SATSSTV-Go stable build.
+
+          - Wails desktop SSTV workbench and CLI, with 43 SSTV modes.
+          - Real-time RX/TX, progressive image preview, MMSSTV-compatible FSKID, templates, album and radio PTT controls.
+          - Simplified Chinese, English and Japanese UI.
+          - Windows x64, Linux x64 (archive, DEB and AppImage), macOS Apple Silicon and Intel.
+          - SHA256SUMS.txt verifies the downloadable packages.
+
+          Windows requires WebView2; Linux requires GTK 3 and WebKit2GTK 4.1. macOS packages are not Developer ID notarized by this workflow.
+          Hardware interoperability is not established by CI alone.
+          NOTES
+          gh release create "$VERSION" \
+            release-assets/SATSSTV-Go-windows-amd64.zip \
+            release-assets/SATSSTV-Go-linux-amd64.tar.gz \
+            release-assets/SATSSTV-Go-linux-amd64.deb \
+            release-assets/SATSSTV-Go-linux-amd64.AppImage \
+            release-assets/SATSSTV-Go-macos-arm64.zip \
+            release-assets/SATSSTV-Go-macos-amd64.zip \
+            release-assets/SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "SATSSTV-Go $VERSION" --notes-file release-notes.md --latest
